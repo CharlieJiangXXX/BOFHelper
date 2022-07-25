@@ -3,7 +3,7 @@ import argparse
 
 from BOFHelper import BOFHelper
 
-# TO-DO: 1. File generation; 2. Comments; 3. Egg hunter, first stage(is_register); 4. preload & postload
+# TO-DO: 2. Comments; 3. Egg hunter, first stage(is_register); 4. preload & postload
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="The Ultimate Buffer Overflow Helper\n"
@@ -41,4 +41,5 @@ if __name__ == "__main__":
     bof.generate_shellcode()
     bof.set_esp_padding(4)
     bof.expand_space()
-    bof.generate_file()
+    bof.send_exploit()
+    # bof.generate_file()

